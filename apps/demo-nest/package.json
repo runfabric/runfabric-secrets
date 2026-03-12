@@ -1,0 +1,19 @@
+{
+  "name": "@runfabric/demo-nest",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "main": "dist/main.js",
+  "types": "dist/main.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "clean": "rm -rf dist",
+    "lint": "eslint .",
+    "test": "node --test test/**/*.test.mjs"
+  },
+  "dependencies": {
+    "@runfabric/secrets-adapter-env": "workspace:*",
+    "@runfabric/secrets-core": "workspace:*"
+  }
+}

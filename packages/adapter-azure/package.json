@@ -1,0 +1,32 @@
+{
+  "name": "@runfabric/secrets-adapter-azure",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "clean": "rm -rf dist",
+    "lint": "eslint .",
+    "test": "node --test test/**/*.test.mjs"
+  },
+  "dependencies": {
+    "@runfabric/secrets-core": "workspace:*"
+  },
+  "peerDependencies": {
+    "@azure/identity": "^4.0.0",
+    "@azure/keyvault-secrets": "^4.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@azure/identity": {
+      "optional": true
+    },
+    "@azure/keyvault-secrets": {
+      "optional": true
+    }
+  }
+}
