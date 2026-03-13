@@ -15,24 +15,30 @@ jobs:
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
       SNYK_API: ${{ secrets.SNYK_API }}
-      SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
       SNYK_ORG: ${{ secrets.SNYK_ORG }}
+      SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
     permissions:
       contents: read
     steps:
+      - name: Skip when SNYK_TOKEN is not configured
+        if: env.SNYK_TOKEN == ''
+        run: echo "SNYK_TOKEN is not configured; skipping Snyk scan."
       - name: Checkout repository
+        if: env.SNYK_TOKEN != ''
         uses: actions/checkout@v5
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-
       - name: Setup Node.js
+        if: env.SNYK_TOKEN != ''
         uses: actions/setup-node@v6
         with:
-          node-version: 20
-          cache: pnpm
-
+          node-version: "24"
+      - name: Enable Corepack
+        if: env.SNYK_TOKEN != ''
+        run: corepack enable
+      - name: Prepare pnpm
+        if: env.SNYK_TOKEN != ''
+        run: corepack install
       - name: Install dependencies
+        if: env.SNYK_TOKEN != ''
         run: pnpm install --frozen-lockfile
 
       - name: Validate Snyk authentication
@@ -84,10 +90,6 @@ jobs:
           if [ "$status" -ne 0 ]; then
             echo "::warning::Snyk monitor failed (exit $status). Continuing."
           fi
-
-      - name: Skip when SNYK_TOKEN is missing
-        if: env.SNYK_TOKEN == ''
-        run: echo "SNYK_TOKEN is not configured, skipping Snyk scan."
 
       - name: Skip when Snyk authentication fails
         if: env.SNYK_TOKEN != '' && steps.snyk_auth.outputs.ok != 'true'
