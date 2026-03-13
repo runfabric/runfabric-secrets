@@ -59,9 +59,6 @@ const workspaceResults = await runWithConcurrency(workspaces, coverageConcurrenc
   const args = [
     "--experimental-test-coverage",
     "--test-coverage-include=dist/**/*.js",
-    `--test-coverage-lines=${String(target.lines)}`,
-    `--test-coverage-branches=${String(target.branches)}`,
-    `--test-coverage-functions=${String(target.functions)}`,
     "--test",
     ...testFiles
   ];
@@ -80,12 +77,21 @@ const workspaceResults = await runWithConcurrency(workspaces, coverageConcurrenc
   }
 
   const metrics = extractCoverageMetrics(`${result.stdout}\n${result.stderr}`);
-  const status = result.status === 0 ? "passed" : "failed";
+  const thresholdFailures = evaluateThresholds(metrics, target);
+  const status =
+    result.status === 0 && thresholdFailures.length === 0 ? "passed" : "failed";
+
+  if (thresholdFailures.length > 0) {
+    process.stderr.write(
+      `Coverage thresholds not met for ${workspace}: ${thresholdFailures.join(", ")}\n`
+    );
+  }
 
   return {
     workspace,
     thresholds: target,
     metrics,
+    thresholdFailures,
     status
   };
 });
@@ -284,6 +290,33 @@ function extractCoverageMetrics(output) {
     branches: Number(match[2]),
     functions: Number(match[3])
   };
+}
+
+function evaluateThresholds(metrics, thresholdsForWorkspace) {
+  if (!metrics) {
+    return ["coverage metrics unavailable"];
+  }
+
+  const failures = [];
+  if (metrics.lines < thresholdsForWorkspace.lines) {
+    failures.push(`lines ${formatMetric(metrics.lines)} < ${formatMetric(thresholdsForWorkspace.lines)}`);
+  }
+  if (metrics.branches < thresholdsForWorkspace.branches) {
+    failures.push(
+      `branches ${formatMetric(metrics.branches)} < ${formatMetric(thresholdsForWorkspace.branches)}`
+    );
+  }
+  if (metrics.functions < thresholdsForWorkspace.functions) {
+    failures.push(
+      `functions ${formatMetric(metrics.functions)} < ${formatMetric(thresholdsForWorkspace.functions)}`
+    );
+  }
+
+  return failures;
+}
+
+function formatMetric(value) {
+  return value.toFixed(2);
 }
 
 function writeSummaryArtifact(entries) {
