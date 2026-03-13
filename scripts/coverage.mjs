@@ -9,6 +9,13 @@ const thresholdConfigPath = join(root, "scripts", "coverage-thresholds.json");
 const thresholds = loadThresholds(thresholdConfigPath);
 const summary = [];
 const coverageConcurrency = resolveConcurrency(process.env.COVERAGE_CONCURRENCY);
+const supportsCoverageIncludeFlag = detectNodeFlagSupport("--test-coverage-include");
+
+if (!supportsCoverageIncludeFlag) {
+  console.warn(
+    "Node runtime does not support --test-coverage-include; running coverage without include filter."
+  );
+}
 
 ensureBuildArtifacts();
 
@@ -57,11 +64,12 @@ const workspaceResults = await runWithConcurrency(workspaces, coverageConcurrenc
   }
 
   const args = [
-    "--experimental-test-coverage",
-    "--test-coverage-include=dist/**/*.js",
-    "--test",
-    ...testFiles
+    "--experimental-test-coverage"
   ];
+  if (supportsCoverageIncludeFlag) {
+    args.push("--test-coverage-include=dist/**/*.js");
+  }
+  args.push("--test", ...testFiles);
 
   const result = await runSpawnCapture(process.execPath, args, {
     cwd: workspacePath,
@@ -317,6 +325,14 @@ function evaluateThresholds(metrics, thresholdsForWorkspace) {
 
 function formatMetric(value) {
   return value.toFixed(2);
+}
+
+function detectNodeFlagSupport(flagName) {
+  const help = spawnSync(process.execPath, ["--help"], {
+    encoding: "utf8"
+  });
+  const helpOutput = `${help.stdout ?? ""}\n${help.stderr ?? ""}`;
+  return helpOutput.includes(flagName);
 }
 
 function writeSummaryArtifact(entries) {
