@@ -42,7 +42,20 @@ const failed = [];
 
 const workspaceResults = await runWithConcurrency(workspaces, coverageConcurrency, async (workspace) => {
   console.log(`== ${workspace} ==`);
+  const workspacePath = join(root, workspace);
+  const testFiles = collectTestFiles(join(workspacePath, "test"), "test");
   const target = resolveThreshold(workspace, thresholds);
+  if (testFiles.length === 0) {
+    const message = `No test files found for ${workspace}. Expected files matching test/**/*.test.mjs`;
+    process.stderr.write(`${message}\n`);
+    return {
+      workspace,
+      thresholds: target,
+      metrics: null,
+      status: "failed"
+    };
+  }
+
   const args = [
     "--experimental-test-coverage",
     "--test-coverage-include=dist/**/*.js",
@@ -50,11 +63,11 @@ const workspaceResults = await runWithConcurrency(workspaces, coverageConcurrenc
     `--test-coverage-branches=${String(target.branches)}`,
     `--test-coverage-functions=${String(target.functions)}`,
     "--test",
-    "test/**/*.test.mjs"
+    ...testFiles
   ];
 
   const result = await runSpawnCapture(process.execPath, args, {
-    cwd: join(root, workspace),
+    cwd: workspacePath,
     env: process.env
   });
 
@@ -151,6 +164,31 @@ function runSpawnCapture(command, args, options) {
       });
     });
   });
+}
+
+function collectTestFiles(absoluteDir, relativeDir) {
+  if (!existsSync(absoluteDir)) {
+    return [];
+  }
+
+  const entries = readdirSync(absoluteDir, { withFileTypes: true });
+  const files = [];
+
+  for (const entry of entries) {
+    const absolutePath = join(absoluteDir, entry.name);
+    const relativePath = join(relativeDir, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...collectTestFiles(absolutePath, relativePath));
+      continue;
+    }
+
+    if (entry.isFile() && entry.name.endsWith(".test.mjs")) {
+      files.push(relativePath);
+    }
+  }
+
+  files.sort();
+  return files;
 }
 
 async function runWithConcurrency(items, concurrency, worker) {
