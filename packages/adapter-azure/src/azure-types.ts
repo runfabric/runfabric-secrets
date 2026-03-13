@@ -18,6 +18,7 @@ export interface AzureSecretClientLike {
     name: string,
     options?: {
       version?: string;
+      abortSignal?: AbortSignal;
     }
   ): Promise<AzureKeyVaultSecretLike>;
   listPropertiesOfSecrets?(): AsyncIterable<unknown>;
@@ -29,10 +30,18 @@ export interface AzureCliExecutionResult {
   exitCode: number | null;
 }
 
+export interface AzureCliExecutionOptions {
+  signal?: AbortSignal;
+  timeoutMs?: number;
+  terminationGraceMs?: number;
+  maxOutputBytes?: number;
+}
+
 export type AzureCliExecutor = (
   binaryPath: string,
   args: string[],
-  context: SecretAdapterContext
+  context: SecretAdapterContext,
+  options?: AzureCliExecutionOptions
 ) => Promise<AzureCliExecutionResult>;
 
 export interface AzureAdapterOptions {
@@ -46,5 +55,8 @@ export interface AzureAdapterOptions {
     binaryPath?: string;
     extraArgs?: string[];
     executor?: AzureCliExecutor;
+    timeoutMs?: number;
+    terminationGraceMs?: number;
+    maxOutputBytes?: number;
   };
 }

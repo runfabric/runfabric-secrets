@@ -19,16 +19,16 @@ export function resolveVaultMount(mount?: string): string {
     return "secret";
   }
 
-  return mount.replace(/^\/+|\/+$/g, "");
+  return normalizeVaultPathInput(mount, "mount");
 }
 
 export function resolveVaultPath(key: string, mount?: string): string {
-  const normalizedKey = key.replace(/^\/+/, "");
+  const normalizedKey = normalizeVaultPathInput(key, "key");
   return `${resolveVaultMount(mount)}/${normalizedKey}`;
 }
 
 export function buildVaultApiPath(key: string, mount: string | undefined, kvVersion: VaultKvVersion): string {
-  const normalizedKey = key.replace(/^\/+/, "");
+  const normalizedKey = normalizeVaultPathInput(key, "key");
   const normalizedMount = resolveVaultMount(mount);
 
   if (kvVersion === 2) {
@@ -42,16 +42,30 @@ export function getVaultCliBinaryPath(options: VaultAdapterOptions): string {
   return options.cli?.binaryPath ?? "vault";
 }
 
-export function getVaultTokenEnvVar(options: VaultAdapterOptions): string {
-  return options.cli?.tokenEnvVar ?? "VAULT_TOKEN";
+const DEFAULT_VAULT_TOKEN_ENV_VAR = "VAULT_TOKEN";
+
+export function getVaultApiTokenEnvVar(options: VaultAdapterOptions): string {
+  return options.api?.tokenEnvVar ?? DEFAULT_VAULT_TOKEN_ENV_VAR;
 }
 
-export function getVaultKvVersion(options: VaultAdapterOptions): VaultKvVersion {
-  return options.api?.kvVersion ?? options.cli?.kvVersion ?? 2;
+export function getVaultCliTokenEnvVar(options: VaultAdapterOptions): string {
+  return options.cli?.tokenEnvVar ?? DEFAULT_VAULT_TOKEN_ENV_VAR;
 }
 
-export function getVaultNamespace(options: VaultAdapterOptions): string | undefined {
-  return options.api?.namespace ?? options.cli?.namespace;
+export function getVaultApiKvVersion(options: VaultAdapterOptions): VaultKvVersion {
+  return options.api?.kvVersion ?? 2;
+}
+
+export function getVaultCliKvVersion(options: VaultAdapterOptions): VaultKvVersion {
+  return options.cli?.kvVersion ?? 2;
+}
+
+export function getVaultApiNamespace(options: VaultAdapterOptions): string | undefined {
+  return options.api?.namespace;
+}
+
+export function getVaultCliNamespace(options: VaultAdapterOptions): string | undefined {
+  return options.cli?.namespace;
 }
 
 export function isVaultNotFoundStatus(status: number): boolean {
@@ -115,4 +129,41 @@ export function parseVaultApiResponse(body: unknown, kvVersion: VaultKvVersion):
     payload: (body as { data?: unknown })?.data,
     metadata: {}
   };
+}
+
+function normalizeVaultPathInput(value: string, kind: "mount" | "key"): string {
+  if (value.includes("\0")) {
+    throw new Error(`Vault ${kind} contains invalid characters.`);
+  }
+
+  if (value.includes("\\")) {
+    throw new Error(`Vault ${kind} must use '/' separators.`);
+  }
+
+  const trimmed = value.trim().replace(/^\/+|\/+$/g, "");
+  if (!trimmed) {
+    throw new Error(`Vault ${kind} cannot be empty.`);
+  }
+
+  const segments = trimmed.split("/").filter((segment) => segment.length > 0);
+  for (const segment of segments) {
+    const decoded = decodeSegment(segment);
+    if (segment === "." || segment === ".." || decoded === "." || decoded === "..") {
+      throw new Error(`Vault ${kind} must not contain path traversal segments.`);
+    }
+
+    if (decoded.includes("/")) {
+      throw new Error(`Vault ${kind} contains an invalid encoded path separator.`);
+    }
+  }
+
+  return segments.join("/");
+}
+
+function decodeSegment(segment: string): string {
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    return segment;
+  }
 }

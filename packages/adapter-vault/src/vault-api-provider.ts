@@ -9,9 +9,9 @@ import type { VaultAdapterOptions } from "./vault-types.js";
 import {
   buildVaultApiPath,
   extractVaultValue,
-  getVaultKvVersion,
-  getVaultNamespace,
-  getVaultTokenEnvVar,
+  getVaultApiKvVersion,
+  getVaultApiNamespace,
+  getVaultApiTokenEnvVar,
   isVaultNotFoundStatus,
   parseVaultApiResponse
 } from "./vault-utils.js";
@@ -21,13 +21,23 @@ export async function loadFromVaultApi(
   context: SecretAdapterContext,
   options: VaultAdapterOptions
 ): Promise<SecretResult> {
-  const kvVersion = getVaultKvVersion(options);
-  const endpointPath = buildVaultApiPath(request.key, options.mount, kvVersion);
-  const endpoint = new URL(endpointPath, options.url).toString();
+  assertVaultApiEndpointIsSecure(options.url);
 
-  const tokenEnvVar = getVaultTokenEnvVar(options);
+  const kvVersion = getVaultApiKvVersion(options);
+  const endpointPath = buildVaultApiPath(request.key, options.mount, kvVersion);
+  const endpointUrl = new URL(endpointPath, options.url);
+  if (request.version) {
+    if (kvVersion !== 2) {
+      throw new Error("Vault KV v1 does not support versioned secret reads.");
+    }
+
+    endpointUrl.searchParams.set("version", request.version);
+  }
+  const endpoint = endpointUrl.toString();
+
+  const tokenEnvVar = getVaultApiTokenEnvVar(options);
   const token = options.api?.token ?? context.env[tokenEnvVar];
-  const namespace = getVaultNamespace(options);
+  const namespace = getVaultApiNamespace(options);
 
   const headers = new Headers({
     Accept: "application/json"
@@ -44,7 +54,8 @@ export async function loadFromVaultApi(
   const fetcher = options.api?.fetcher ?? getDefaultFetcher();
   const response = await fetcher(endpoint, {
     method: "GET",
-    headers
+    headers,
+    signal: request.signal
   });
 
   if (isVaultNotFoundStatus(response.status)) {
@@ -81,10 +92,12 @@ export async function checkVaultApiHealth(
   options: VaultAdapterOptions
 ): Promise<{ ok: boolean; details?: unknown }> {
   try {
+    assertVaultApiEndpointIsSecure(options.url);
+
     const endpoint = new URL("/v1/sys/health?standbyok=true", options.url).toString();
-    const tokenEnvVar = getVaultTokenEnvVar(options);
+    const tokenEnvVar = getVaultApiTokenEnvVar(options);
     const token = options.api?.token ?? context.env[tokenEnvVar];
-    const namespace = getVaultNamespace(options);
+    const namespace = getVaultApiNamespace(options);
 
     const headers = new Headers({ Accept: "application/json" });
     if (token) {
@@ -140,4 +153,11 @@ function getDefaultFetcher() {
   }
 
   return fetch;
+}
+
+function assertVaultApiEndpointIsSecure(url: string): void {
+  const parsed = new URL(url);
+  if (parsed.protocol !== "https:") {
+    throw new Error(`Vault API mode requires an HTTPS URL. Received '${url}'.`);
+  }
 }

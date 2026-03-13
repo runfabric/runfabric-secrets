@@ -27,3 +27,18 @@ test("env adapter throws SecretNotFoundError for missing key", async () => {
     SecretNotFoundError
   );
 });
+
+test("env adapter honors aborted requests", async () => {
+  const adapter = createEnvAdapter();
+  const controller = new AbortController();
+  controller.abort();
+
+  await assert.rejects(
+    () =>
+      adapter.get(
+        { source: "env", key: "API_KEY", required: true, signal: controller.signal },
+        { now: Date.now, env: { API_KEY: "abc123" } }
+      ),
+    /aborted/i
+  );
+});

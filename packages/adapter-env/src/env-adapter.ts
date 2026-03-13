@@ -18,6 +18,12 @@ export function createEnvAdapter(): SecretAdapter {
       request: SingleSourceSecretRequest,
       context: SecretAdapterContext
     ): Promise<SecretResult> {
+      if (request.signal?.aborted) {
+        const error = new Error("Env adapter request was aborted");
+        error.name = "AbortError";
+        throw error;
+      }
+
       const value = context.env[request.key];
 
       if (value == null) {

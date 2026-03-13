@@ -15,8 +15,18 @@ export interface AwsGetSecretOutput {
 }
 
 export interface AwsSecretsManagerClientLike {
-  getSecretValue?(input: AwsGetSecretInput): Promise<AwsGetSecretOutput>;
-  send?(command: unknown): Promise<AwsGetSecretOutput>;
+  getSecretValue?(
+    input: AwsGetSecretInput,
+    options?: {
+      abortSignal?: AbortSignal;
+    }
+  ): Promise<AwsGetSecretOutput>;
+  send?(
+    command: unknown,
+    options?: {
+      abortSignal?: AbortSignal;
+    }
+  ): Promise<AwsGetSecretOutput>;
 }
 
 export interface AwsCliExecutionResult {
@@ -25,10 +35,18 @@ export interface AwsCliExecutionResult {
   exitCode: number | null;
 }
 
+export interface AwsCliExecutionOptions {
+  signal?: AbortSignal;
+  timeoutMs?: number;
+  terminationGraceMs?: number;
+  maxOutputBytes?: number;
+}
+
 export type AwsCliExecutor = (
   binaryPath: string,
   args: string[],
-  context: SecretAdapterContext
+  context: SecretAdapterContext,
+  options?: AwsCliExecutionOptions
 ) => Promise<AwsCliExecutionResult>;
 
 export interface AwsAdapterOptions {
@@ -41,5 +59,8 @@ export interface AwsAdapterOptions {
     binaryPath?: string;
     extraArgs?: string[];
     executor?: AwsCliExecutor;
+    timeoutMs?: number;
+    terminationGraceMs?: number;
+    maxOutputBytes?: number;
   };
 }

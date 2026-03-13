@@ -16,7 +16,6 @@ import { createAdapterRegistry } from "./registry.js";
 import {
   createEmptyResult,
   isFallbackRequest,
-  isRetryableFallbackError,
   orderFallbackSources,
   parseSecretValue,
   shouldFailFast,
@@ -44,7 +43,6 @@ type ResolvedMode = SecretMode | "native";
 
 interface LoadOptions {
   skipCache?: boolean;
-  reason?: "direct" | "fallback" | "background" | "manual-refresh";
 }
 
 function resolveMode(
@@ -62,6 +60,11 @@ function resolveMode(
 
   if (adapter.capabilities.native) {
     return "native";
+  }
+
+  const alternateMode: SecretMode = defaultMode === "api" ? "cli" : "api";
+  if (adapter.capabilities[alternateMode]) {
+    return alternateMode;
   }
 
   return defaultMode;
@@ -109,7 +112,8 @@ function resolveEnvironment(input?: SecretEnvironment): SecretEnvironment {
 
 function toSingleSourceRequest(
   request: FallbackSecretRequest,
-  sourceConfig: FallbackSourceConfig
+  sourceConfig: FallbackSourceConfig,
+  signal?: AbortSignal
 ): SingleSourceSecretRequest {
   return {
     key: request.key,
@@ -119,12 +123,22 @@ function toSingleSourceRequest(
     version: request.version,
     refreshIntervalMs: request.refreshIntervalMs,
     source: sourceConfig.source,
-    mode: sourceConfig.mode
+    mode: sourceConfig.mode,
+    signal
   };
 }
 
+function isAbortError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "name" in error &&
+    (error as { name?: unknown }).name === "AbortError"
+  );
+}
+
 export function createSecretClient(options: SecretClientOptions): SecretClient {
-  const adapterMap = createAdapterRegistry(options.adapters);
+  const adapterMap = createAdapterRegistry(options.adapters, options.logger);
   const cache = options.cache ?? new InMemorySecretCache();
   const defaultMode = options.defaultMode ?? DEFAULT_SECRET_MODE;
   const defaultCacheTtlMs = options.defaultCacheTtlMs ?? DEFAULT_SECRET_CACHE_TTL_MS;
@@ -270,8 +284,7 @@ export function createSecretClient(options: SecretClientOptions): SecretClient {
 
       try {
         await loadFromSingleSource(normalizedRequest, {
-          skipCache: true,
-          reason: "background"
+          skipCache: true
         });
         emit.backgroundRefresh(normalizedRequest, refreshIntervalMs);
       } catch (error) {
@@ -357,17 +370,11 @@ export function createSecretClient(options: SecretClientOptions): SecretClient {
       );
 
       try {
-        return await loadFromSingleSource<T>(toSingleSourceRequest(request, sourceConfig), {
-          reason: "fallback"
-        });
+        return await loadFromSingleSource<T>(toSingleSourceRequest(request, sourceConfig));
       } catch (error) {
         lastError = error;
 
         if (shouldFailFast(error, policy)) {
-          throw error;
-        }
-
-        if (policy.failFast && !isRetryableFallbackError(error, policy)) {
           throw error;
         }
       }
@@ -395,6 +402,8 @@ export function createSecretClient(options: SecretClientOptions): SecretClient {
     let nextIndex = 0;
     let inFlight = 0;
     let lastError: unknown;
+    const abortController =
+      typeof AbortController === "function" ? new AbortController() : undefined;
 
     return new Promise<SecretResult<T>>((resolve, reject) => {
       const launchNext = () => {
@@ -416,14 +425,15 @@ export function createSecretClient(options: SecretClientOptions): SecretClient {
             policy.strategy ?? "parallel"
           );
 
-          loadFromSingleSource<T>(toSingleSourceRequest(request, sourceConfig), {
-            reason: "fallback"
-          })
+          loadFromSingleSource<T>(
+            toSingleSourceRequest(request, sourceConfig, abortController?.signal)
+          )
             .then((result) => {
               if (done) {
                 return;
               }
               done = true;
+              abortController?.abort();
               resolve(result);
             })
             .catch((error) => {
@@ -431,10 +441,15 @@ export function createSecretClient(options: SecretClientOptions): SecretClient {
                 return;
               }
 
+              if (isAbortError(error)) {
+                return;
+              }
+
               lastError = error;
 
               if (shouldFailFast(error, policy)) {
                 done = true;
+                abortController?.abort();
                 reject(error);
                 return;
               }
@@ -510,7 +525,7 @@ export function createSecretClient(options: SecretClientOptions): SecretClient {
       try {
         const result = isFallbackRequest(request)
           ? await runFallback<T>(request)
-          : await loadFromSingleSource<T>(request, { reason: "direct" });
+          : await loadFromSingleSource<T>(request);
 
         emit.requestSuccess(
           request,
@@ -538,16 +553,12 @@ export function createSecretClient(options: SecretClientOptions): SecretClient {
     },
 
     async has(request: SecretRequest): Promise<boolean> {
-      try {
-        const result = await client.get({
-          ...request,
-          required: false
-        });
+      const result = await client.get({
+        ...request,
+        required: false
+      });
 
-        return result.value !== undefined && result.value !== null;
-      } catch {
-        return false;
-      }
+      return result.value !== undefined && result.value !== null;
     },
 
     async invalidate(request: SecretRequest): Promise<void> {
@@ -564,8 +575,7 @@ export function createSecretClient(options: SecretClientOptions): SecretClient {
 
     refresh<T = unknown>(request: SingleSourceSecretRequest): Promise<SecretResult<T>> {
       return loadFromSingleSource<T>(request, {
-        skipCache: true,
-        reason: "manual-refresh"
+        skipCache: true
       });
     },
 

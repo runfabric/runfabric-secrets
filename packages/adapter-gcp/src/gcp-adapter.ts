@@ -9,11 +9,16 @@ import { checkGcpCliHealth, loadFromGcpCli } from "./gcp-cli-provider.js";
 import type { GcpAdapterOptions } from "./gcp-types.js";
 
 export function createGcpAdapter(options: GcpAdapterOptions): SecretAdapter {
+  const hasApiConfig = options.api != null;
+  const hasCliConfig = options.cli != null;
+  const apiEnabled = hasApiConfig || !hasCliConfig;
+  const cliEnabled = hasCliConfig || !hasApiConfig;
+
   return {
     source: "gcp",
     capabilities: {
-      api: true,
-      cli: true,
+      api: apiEnabled,
+      cli: cliEnabled,
       versioning: true,
       structuredData: true
     },
@@ -30,6 +35,26 @@ export function createGcpAdapter(options: GcpAdapterOptions): SecretAdapter {
     },
 
     async healthCheck(context: SecretAdapterContext): Promise<{ ok: boolean; details?: unknown }> {
+      if (hasApiConfig && !hasCliConfig) {
+        const api = await checkGcpApiHealth(context, options);
+        return {
+          ok: api.ok,
+          details: {
+            api
+          }
+        };
+      }
+
+      if (hasCliConfig && !hasApiConfig) {
+        const cli = await checkGcpCliHealth(context, options);
+        return {
+          ok: cli.ok,
+          details: {
+            cli
+          }
+        };
+      }
+
       const [api, cli] = await Promise.all([
         checkGcpApiHealth(context, options),
         checkGcpCliHealth(context, options)

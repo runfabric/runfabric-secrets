@@ -12,11 +12,20 @@ export async function discoverAdapters(
   options: SecretAdapterDiscoveryOptions
 ): Promise<SecretAdapter[]> {
   const importer = options.importer ?? defaultImporter;
+  const usingDefaultImporter = options.importer == null;
+  const allowedModules = normalizeAllowedModules(options.allowedModules);
   const adapters: SecretAdapter[] = [];
+
+  if (usingDefaultImporter && allowedModules.size === 0) {
+    throw new SecretDiscoveryError(
+      "<discovery>",
+      "allowedModules must be provided when using the default importer"
+    );
+  }
 
   for (const entry of options.plugins) {
     const plugin = normalizePlugin(entry);
-    const moduleName = plugin.module;
+    const moduleName = validatePluginModuleName(plugin.module, allowedModules);
 
     let moduleNamespace: unknown;
 
@@ -124,6 +133,57 @@ function normalizePlugin(entry: string | SecretAdapterDiscoveryPlugin): SecretAd
   }
 
   return entry;
+}
+
+const MODULE_SCHEME_PATTERN = /^[a-zA-Z][a-zA-Z0-9+.-]*:/;
+const BARE_MODULE_PATTERN =
+  /^(@[a-zA-Z0-9][a-zA-Z0-9._-]*\/)?[a-zA-Z0-9][a-zA-Z0-9._-]*(\/[a-zA-Z0-9][a-zA-Z0-9._-]*)*$/;
+
+function normalizeAllowedModules(allowedModules?: string[]): Set<string> {
+  if (!allowedModules || allowedModules.length === 0) {
+    return new Set<string>();
+  }
+
+  return new Set(
+    allowedModules
+      .map((entry) => entry.trim())
+      .filter((entry) => entry.length > 0)
+  );
+}
+
+function validatePluginModuleName(moduleName: string, allowedModules: ReadonlySet<string>): string {
+  const normalized = moduleName.trim();
+  if (!normalized) {
+    throw new SecretDiscoveryError(moduleName, "Plugin module name cannot be empty");
+  }
+
+  if (normalized.includes("\0")) {
+    throw new SecretDiscoveryError(moduleName, "Plugin module name contains invalid characters");
+  }
+
+  if (MODULE_SCHEME_PATTERN.test(normalized) || normalized.startsWith("/") || normalized.startsWith("\\")) {
+    throw new SecretDiscoveryError(moduleName, "Plugin module must not use URL or absolute-path schemes");
+  }
+
+  if (allowedModules.size > 0) {
+    if (!allowedModules.has(normalized)) {
+      throw new SecretDiscoveryError(
+        moduleName,
+        "Plugin module is not in the allowlist"
+      );
+    }
+
+    return normalized;
+  }
+
+  if (!BARE_MODULE_PATTERN.test(normalized)) {
+    throw new SecretDiscoveryError(
+      moduleName,
+      "Plugin module must be a bare package specifier unless explicitly allowlisted"
+    );
+  }
+
+  return normalized;
 }
 
 function isSecretAdapter(value: unknown): value is SecretAdapter {

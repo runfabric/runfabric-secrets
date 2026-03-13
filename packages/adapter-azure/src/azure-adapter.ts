@@ -9,11 +9,16 @@ import { checkAzureCliHealth, loadFromAzureCli } from "./azure-cli-provider.js";
 import type { AzureAdapterOptions } from "./azure-types.js";
 
 export function createAzureAdapter(options: AzureAdapterOptions): SecretAdapter {
+  const hasApiConfig = options.api != null;
+  const hasCliConfig = options.cli != null;
+  const apiEnabled = hasApiConfig || !hasCliConfig;
+  const cliEnabled = hasCliConfig || !hasApiConfig;
+
   return {
     source: "azure",
     capabilities: {
-      api: true,
-      cli: true,
+      api: apiEnabled,
+      cli: cliEnabled,
       versioning: true,
       structuredData: true
     },
@@ -30,6 +35,26 @@ export function createAzureAdapter(options: AzureAdapterOptions): SecretAdapter 
     },
 
     async healthCheck(context: SecretAdapterContext): Promise<{ ok: boolean; details?: unknown }> {
+      if (hasApiConfig && !hasCliConfig) {
+        const api = await checkAzureApiHealth(context, options);
+        return {
+          ok: api.ok,
+          details: {
+            api
+          }
+        };
+      }
+
+      if (hasCliConfig && !hasApiConfig) {
+        const cli = await checkAzureCliHealth(context, options);
+        return {
+          ok: cli.ok,
+          details: {
+            cli
+          }
+        };
+      }
+
       const [api, cli] = await Promise.all([
         checkAzureApiHealth(context, options),
         checkAzureCliHealth(context, options)

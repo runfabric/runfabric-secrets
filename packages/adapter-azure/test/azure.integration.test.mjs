@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { SecretNotFoundError } from "@runfabric/secrets-core";
 import {
   createAzureAdapter,
+  executeAzureCli,
   loadFromAzureApi,
   loadFromAzureCli
 } from "../dist/index.js";
@@ -60,6 +61,31 @@ test("Azure API provider maps not found", async () => {
         }
       ),
     SecretNotFoundError
+  );
+});
+
+test("Azure API provider honors abort signals", async () => {
+  const controller = new AbortController();
+  const pending = loadFromAzureApi(
+    { source: "azure", key: "abort-key", mode: "api", required: true, signal: controller.signal },
+    { now: Date.now, env: process.env },
+    {
+      vaultUrl: "https://demo-kv.vault.azure.net",
+      api: {
+        client: {
+          async getSecret() {
+            return new Promise(() => {});
+          }
+        }
+      }
+    }
+  );
+
+  controller.abort();
+
+  await assert.rejects(
+    () => pending,
+    (error) => error?.name === "AbortError"
   );
 });
 
@@ -130,4 +156,102 @@ test("Azure adapter healthCheck returns details", async () => {
   const health = await adapter.healthCheck?.({ now: Date.now, env: process.env });
   assert.equal(health?.ok, true);
   assert.equal(typeof health?.details, "object");
+});
+
+test("Azure adapter healthCheck only probes configured mode", async () => {
+  const adapter = createAzureAdapter({
+    vaultUrl: "https://demo-kv.vault.azure.net",
+    api: {
+      client: {
+        async getSecret() {
+          return {
+            value: "ok",
+            properties: {}
+          };
+        },
+        async *listPropertiesOfSecrets() {
+          yield { name: "first" };
+        }
+      }
+    }
+  });
+
+  const health = await adapter.healthCheck?.({ now: Date.now, env: process.env });
+  const details = health?.details ?? {};
+
+  assert.equal(health?.ok, true);
+  assert.equal("api" in details, true);
+  assert.equal("cli" in details, false);
+});
+
+test("Azure adapter capabilities reflect configured modes", () => {
+  const apiOnly = createAzureAdapter({
+    vaultUrl: "https://demo.vault.azure.net",
+    api: {
+      client: {
+        async getSecret() {
+          return {
+            value: "api-value",
+            properties: {}
+          };
+        }
+      }
+    }
+  });
+  const cliOnly = createAzureAdapter({
+    vaultUrl: "https://demo.vault.azure.net",
+    cli: {
+      executor: async () => ({ stdout: "", stderr: "", exitCode: 0 })
+    }
+  });
+  const implicit = createAzureAdapter({
+    vaultUrl: "https://demo.vault.azure.net"
+  });
+
+  assert.equal(apiOnly.capabilities.api, true);
+  assert.equal(apiOnly.capabilities.cli, false);
+  assert.equal(cliOnly.capabilities.api, false);
+  assert.equal(cliOnly.capabilities.cli, true);
+  assert.equal(implicit.capabilities.api, true);
+  assert.equal(implicit.capabilities.cli, true);
+});
+
+test("Azure CLI executor enforces timeout and abort", async () => {
+  await assert.rejects(
+    () =>
+      executeAzureCli(
+        process.execPath,
+        ["-e", "setTimeout(() => {}, 2000)"],
+        { now: Date.now, env: process.env },
+        { timeoutMs: 20 }
+      ),
+    /timed out/
+  );
+
+  const controller = new AbortController();
+  const pending = executeAzureCli(
+    process.execPath,
+    ["-e", "setTimeout(() => {}, 2000)"],
+    { now: Date.now, env: process.env },
+    { signal: controller.signal, timeoutMs: 1_000 }
+  );
+  controller.abort();
+
+  await assert.rejects(
+    () => pending,
+    (error) => error?.name === "AbortError"
+  );
+});
+
+test("Azure CLI executor enforces output size limits", async () => {
+  await assert.rejects(
+    () =>
+      executeAzureCli(
+        process.execPath,
+        ["-e", "process.stdout.write('x'.repeat(5000))"],
+        { now: Date.now, env: process.env },
+        { maxOutputBytes: 1024, timeoutMs: 1_000 }
+      ),
+    /output exceeded/
+  );
 });

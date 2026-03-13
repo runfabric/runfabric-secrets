@@ -19,13 +19,13 @@ export function toCacheKey(
   request: SingleSourceSecretRequest,
   resolvedMode: "api" | "cli" | "native"
 ): string {
-  return [
-    request.source,
-    resolvedMode,
-    request.key,
-    request.version ?? "latest",
-    request.parseAs ?? "raw"
-  ].join("::");
+  return JSON.stringify({
+    source: request.source,
+    mode: resolvedMode,
+    key: request.key,
+    version: request.version ?? "latest",
+    parseAs: request.parseAs ?? "raw"
+  });
 }
 
 export function parseSecretValue(

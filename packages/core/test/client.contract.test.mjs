@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  SecretDuplicateAdapterError,
   SecretModeNotSupportedError,
   SecretNotFoundError,
   SecretParseError,
@@ -195,4 +196,44 @@ test("source registry and mode support", async () => {
 
   const apiValue = await client.getValue({ source: "aws", mode: "api", key: "A", required: true });
   assert.equal(apiValue, "y");
+});
+
+test("has propagates operational errors", async () => {
+  const client = createSecretClient({
+    adapters: [
+      {
+        source: "env",
+        capabilities: { native: true },
+        async get() {
+          throw new Error("network offline");
+        }
+      }
+    ]
+  });
+
+  await assert.rejects(
+    () => client.has({ source: "env", key: "ANY_KEY" }),
+    /network offline/
+  );
+});
+
+test("duplicate source adapters throw during client creation", async () => {
+  const first = createAdapter({
+    source: "env",
+    capabilities: { native: true },
+    values: new Map(),
+    hits: { count: 0 }
+  });
+
+  const second = createAdapter({
+    source: "env",
+    capabilities: { native: true },
+    values: new Map(),
+    hits: { count: 0 }
+  });
+
+  assert.throws(
+    () => createSecretClient({ adapters: [first, second] }),
+    SecretDuplicateAdapterError
+  );
 });

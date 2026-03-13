@@ -8,12 +8,15 @@
     "build": "turbo run build",
     "dev": "turbo run dev",
     "test": "turbo run test",
+    "coverage": "node scripts/coverage.mjs",
     "lint": "turbo run lint",
     "typecheck": "turbo run typecheck",
     "clean": "turbo run clean",
     "release:check": "node scripts/release-check.mjs",
-    "verify:v1": "pnpm lint && pnpm test && pnpm typecheck && pnpm build && pnpm release:check",
-    "verify:v2": "pnpm lint && pnpm test && pnpm typecheck && pnpm build && pnpm release:check"
+    "snyk:test": "npx snyk test --all-projects",
+    "snyk:monitor": "npx snyk monitor --all-projects",
+    "verify:v1": "pnpm lint && pnpm test && pnpm typecheck && pnpm build && pnpm coverage && pnpm release:check",
+    "verify:v2": "pnpm lint && pnpm test && pnpm typecheck && pnpm build && pnpm coverage && pnpm release:check"
   },
   "devDependencies": {
     "@eslint/js": "^9.22.0",

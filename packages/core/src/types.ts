@@ -40,6 +40,7 @@ export interface SecretRequestBase {
 export interface SingleSourceSecretRequest extends SecretRequestBase {
   source: SecretSource;
   mode?: SecretMode;
+  signal?: AbortSignal;
 }
 
 export interface FallbackSourceConfig {
@@ -187,6 +188,7 @@ export interface SecretAdapterDiscoveryOptions {
   plugins: Array<string | SecretAdapterDiscoveryPlugin>;
   importer?: (moduleName: string) => Promise<unknown>;
   logger?: SecretLogger;
+  allowedModules?: string[];
 }
 
 export interface CreateSecretClientWithDiscoveryOptions extends Omit<SecretClientOptions, "adapters"> {

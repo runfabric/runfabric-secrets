@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { SecretNotFoundError } from "@runfabric/secrets-core";
 import {
   createGcpAdapter,
+  executeGcpCli,
   loadFromGcpApi,
   loadFromGcpCli
 } from "../dist/index.js";
@@ -59,6 +60,31 @@ test("GCP API provider maps not found", async () => {
         }
       ),
     SecretNotFoundError
+  );
+});
+
+test("GCP API provider honors abort signals", async () => {
+  const controller = new AbortController();
+  const pending = loadFromGcpApi(
+    { source: "gcp", key: "abort-key", mode: "api", required: true, signal: controller.signal },
+    { now: Date.now, env: process.env },
+    {
+      projectId: "demo-project",
+      api: {
+        client: {
+          async accessSecretVersion() {
+            return new Promise(() => {});
+          }
+        }
+      }
+    }
+  );
+
+  controller.abort();
+
+  await assert.rejects(
+    () => pending,
+    (error) => error?.name === "AbortError"
   );
 });
 
@@ -125,4 +151,96 @@ test("GCP adapter healthCheck returns details", async () => {
   const health = await adapter.healthCheck?.({ now: Date.now, env: process.env });
   assert.equal(health?.ok, true);
   assert.equal(typeof health?.details, "object");
+});
+
+test("GCP adapter healthCheck only probes configured mode", async () => {
+  const adapter = createGcpAdapter({
+    projectId: "demo-project",
+    api: {
+      client: {
+        async accessSecretVersion() {
+          return [{ payload: { data: Buffer.from("ok").toString("base64") } }];
+        },
+        async listSecrets() {
+          return {};
+        }
+      }
+    }
+  });
+
+  const health = await adapter.healthCheck?.({ now: Date.now, env: process.env });
+  const details = health?.details ?? {};
+
+  assert.equal(health?.ok, true);
+  assert.equal("api" in details, true);
+  assert.equal("cli" in details, false);
+});
+
+test("GCP adapter capabilities reflect configured modes", () => {
+  const apiOnly = createGcpAdapter({
+    projectId: "demo-project",
+    api: {
+      client: {
+        async accessSecretVersion() {
+          return [{ payload: { data: Buffer.from("api-value").toString("base64") } }];
+        }
+      }
+    }
+  });
+  const cliOnly = createGcpAdapter({
+    projectId: "demo-project",
+    cli: {
+      executor: async () => ({ stdout: "", stderr: "", exitCode: 0 })
+    }
+  });
+  const implicit = createGcpAdapter({
+    projectId: "demo-project"
+  });
+
+  assert.equal(apiOnly.capabilities.api, true);
+  assert.equal(apiOnly.capabilities.cli, false);
+  assert.equal(cliOnly.capabilities.api, false);
+  assert.equal(cliOnly.capabilities.cli, true);
+  assert.equal(implicit.capabilities.api, true);
+  assert.equal(implicit.capabilities.cli, true);
+});
+
+test("GCP CLI executor enforces timeout and abort", async () => {
+  await assert.rejects(
+    () =>
+      executeGcpCli(
+        process.execPath,
+        ["-e", "setTimeout(() => {}, 2000)"],
+        { now: Date.now, env: process.env },
+        { timeoutMs: 20 }
+      ),
+    /timed out/
+  );
+
+  const controller = new AbortController();
+  const pending = executeGcpCli(
+    process.execPath,
+    ["-e", "setTimeout(() => {}, 2000)"],
+    { now: Date.now, env: process.env },
+    { signal: controller.signal, timeoutMs: 1_000 }
+  );
+  controller.abort();
+
+  await assert.rejects(
+    () => pending,
+    (error) => error?.name === "AbortError"
+  );
+});
+
+test("GCP CLI executor enforces output size limits", async () => {
+  await assert.rejects(
+    () =>
+      executeGcpCli(
+        process.execPath,
+        ["-e", "process.stdout.write('x'.repeat(5000))"],
+        { now: Date.now, env: process.env },
+        { maxOutputBytes: 1024, timeoutMs: 1_000 }
+      ),
+    /output exceeded/
+  );
 });

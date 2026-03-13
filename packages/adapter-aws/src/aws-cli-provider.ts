@@ -6,7 +6,11 @@ import {
   type SecretResult,
   type SingleSourceSecretRequest
 } from "@runfabric/secrets-core";
-import type { AwsAdapterOptions, AwsCliExecutionResult } from "./aws-types.js";
+import type {
+  AwsAdapterOptions,
+  AwsCliExecutionOptions,
+  AwsCliExecutionResult
+} from "./aws-types.js";
 import {
   extractAwsSecretValue,
   getAwsCliBinaryPath,
@@ -35,7 +39,12 @@ export async function loadFromAwsCli(
   ];
 
   const executor = options.cli?.executor ?? executeAwsCli;
-  const result = await executor(binaryPath, args, context);
+  const result = await executor(
+    binaryPath,
+    args,
+    context,
+    resolveCliExecutionOptions(options, request.signal)
+  );
 
   if (result.exitCode !== 0) {
     if (isAwsCliNotFound(result.stderr)) {
@@ -70,8 +79,13 @@ export async function loadFromAwsCli(
 export async function executeAwsCli(
   binaryPath: string,
   args: string[],
-  context: SecretAdapterContext
+  context: SecretAdapterContext,
+  executionOptions: AwsCliExecutionOptions = {}
 ): Promise<AwsCliExecutionResult> {
+  if (executionOptions.signal?.aborted) {
+    throw createAbortError("AWS CLI command was aborted before execution");
+  }
+
   return new Promise((resolve, reject) => {
     const child = spawn(binaryPath, args, {
       env: context.env,
@@ -80,22 +94,120 @@ export async function executeAwsCli(
 
     let stdout = "";
     let stderr = "";
+    let settled = false;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    let forceKillTimer: ReturnType<typeof setTimeout> | undefined;
+    let terminationError: Error | null = null;
+    const timeoutMs = executionOptions.timeoutMs ?? DEFAULT_AWS_CLI_TIMEOUT_MS;
+    const terminationGraceMs =
+      executionOptions.terminationGraceMs ?? DEFAULT_AWS_CLI_TERMINATION_GRACE_MS;
+    const maxOutputBytes = executionOptions.maxOutputBytes ?? DEFAULT_AWS_CLI_MAX_OUTPUT_BYTES;
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+
+    const finish = (handler: () => void) => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+
+      if (timeout) {
+        clearTimeout(timeout);
+      }
+
+      if (forceKillTimer) {
+        clearTimeout(forceKillTimer);
+      }
+
+      if (executionOptions.signal) {
+        executionOptions.signal.removeEventListener("abort", onAbort);
+      }
+
+      handler();
+    };
+
+    const requestStop = (error: Error) => {
+      if (terminationError) {
+        return;
+      }
+
+      terminationError = error;
+      child.kill("SIGTERM");
+
+      if (terminationGraceMs > 0) {
+        forceKillTimer = setTimeout(() => {
+          child.kill("SIGKILL");
+        }, terminationGraceMs);
+
+        if (typeof forceKillTimer.unref === "function") {
+          forceKillTimer.unref();
+        }
+      }
+    };
+
+    const onAbort = () => {
+      requestStop(createAbortError("AWS CLI command was aborted"));
+    };
+
+    const appendChunk = (stream: "stdout" | "stderr", chunk: Buffer) => {
+      const totalBytes = stdoutBytes + stderrBytes + chunk.length;
+      if (maxOutputBytes > 0 && totalBytes > maxOutputBytes) {
+        requestStop(new Error(`AWS CLI output exceeded ${maxOutputBytes} bytes`));
+        return;
+      }
+
+      const text = chunk.toString("utf8");
+      if (stream === "stdout") {
+        stdoutBytes += chunk.length;
+        stdout += text;
+        return;
+      }
+
+      stderrBytes += chunk.length;
+      stderr += text;
+    };
 
     child.stdout.on("data", (chunk: Buffer) => {
-      stdout += chunk.toString("utf8");
+      appendChunk("stdout", chunk);
     });
 
     child.stderr.on("data", (chunk: Buffer) => {
-      stderr += chunk.toString("utf8");
+      appendChunk("stderr", chunk);
     });
 
-    child.on("error", reject);
+    if (executionOptions.signal) {
+      executionOptions.signal.addEventListener("abort", onAbort, { once: true });
+    }
+
+    if (timeoutMs > 0) {
+      timeout = setTimeout(() => {
+        requestStop(new Error(`AWS CLI command timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+
+      if (typeof timeout.unref === "function") {
+        timeout.unref();
+      }
+    }
+
+    child.on("error", (error) => {
+      finish(() => {
+        reject(terminationError ?? error);
+      });
+    });
 
     child.on("close", (exitCode) => {
-      resolve({
-        stdout,
-        stderr,
-        exitCode
+      finish(() => {
+        if (terminationError) {
+          reject(terminationError);
+          return;
+        }
+
+        resolve({
+          stdout,
+          stderr,
+          exitCode
+        });
       });
     });
   });
@@ -116,9 +228,10 @@ export async function checkAwsCliHealth(
 ): Promise<{ ok: boolean; details?: unknown }> {
   const binaryPath = getAwsCliBinaryPath(options);
   const executor = options.cli?.executor ?? executeAwsCli;
+  const executionOptions = resolveCliExecutionOptions(options);
 
   try {
-    const result = await executor(binaryPath, ["--version"], context);
+    const result = await executor(binaryPath, ["--version"], context, executionOptions);
     if (result.exitCode !== 0) {
       return {
         ok: false,
@@ -148,4 +261,32 @@ export async function checkAwsCliHealth(
       }
     };
   }
+}
+
+const DEFAULT_AWS_CLI_TIMEOUT_MS = 60_000;
+const DEFAULT_AWS_CLI_TERMINATION_GRACE_MS = 5_000;
+const DEFAULT_AWS_CLI_MAX_OUTPUT_BYTES = 1_048_576;
+
+function resolveCliExecutionOptions(
+  options: AwsAdapterOptions,
+  signal?: AbortSignal
+): AwsCliExecutionOptions {
+  const timeoutMs = options.cli?.timeoutMs ?? DEFAULT_AWS_CLI_TIMEOUT_MS;
+  const terminationGraceMs =
+    options.cli?.terminationGraceMs ?? DEFAULT_AWS_CLI_TERMINATION_GRACE_MS;
+  const maxOutputBytes =
+    options.cli?.maxOutputBytes ?? DEFAULT_AWS_CLI_MAX_OUTPUT_BYTES;
+
+  return {
+    signal,
+    timeoutMs: Math.max(0, Math.floor(timeoutMs)),
+    terminationGraceMs: Math.max(0, Math.floor(terminationGraceMs)),
+    maxOutputBytes: Math.max(0, Math.floor(maxOutputBytes))
+  };
+}
+
+function createAbortError(message: string): Error {
+  const error = new Error(message);
+  error.name = "AbortError";
+  return error;
 }

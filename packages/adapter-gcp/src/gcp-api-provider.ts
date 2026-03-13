@@ -22,6 +22,8 @@ interface GcpSdkModule {
   }) => GcpSecretManagerClientLike;
 }
 
+const apiClientCache = new WeakMap<GcpAdapterOptions, Promise<GcpSecretManagerClientLike>>();
+
 export async function loadFromGcpApi(
   request: SingleSourceSecretRequest,
   context: SecretAdapterContext,
@@ -31,7 +33,7 @@ export async function loadFromGcpApi(
 
   try {
     const client = await getApiClient(options);
-    const response = await invokeAccessSecretVersion(client, name, context);
+    const response = await invokeAccessSecretVersion(client, name, context, request.signal);
     const value = extractGcpSecretValue(request.key, response);
 
     return {
@@ -94,6 +96,23 @@ export async function checkGcpApiHealth(
 }
 
 async function getApiClient(options: GcpAdapterOptions): Promise<GcpSecretManagerClientLike> {
+  const cached = apiClientCache.get(options);
+  if (cached) {
+    return cached;
+  }
+
+  const pendingClient = resolveApiClient(options);
+  apiClientCache.set(options, pendingClient);
+
+  try {
+    return await pendingClient;
+  } catch (error) {
+    apiClientCache.delete(options);
+    throw error;
+  }
+}
+
+async function resolveApiClient(options: GcpAdapterOptions): Promise<GcpSecretManagerClientLike> {
   if (options.api?.client) {
     return options.api.client;
   }
@@ -107,7 +126,8 @@ async function getApiClient(options: GcpAdapterOptions): Promise<GcpSecretManage
 async function invokeAccessSecretVersion(
   client: GcpSecretManagerClientLike,
   name: string,
-  context: SecretAdapterContext
+  context: SecretAdapterContext,
+  signal?: AbortSignal
 ): Promise<GcpAccessSecretVersionResponse> {
   if (typeof client.accessSecretVersion !== "function") {
     context.logger?.error("GCP API client is missing accessSecretVersion method", {
@@ -116,13 +136,23 @@ async function invokeAccessSecretVersion(
     throw new Error("Invalid GCP API client: expected accessSecretVersion method");
   }
 
-  const response = await client.accessSecretVersion({ name });
+  throwIfAborted(signal);
+
+  const response = await withAbortSignal(
+    client.accessSecretVersion(
+      { name },
+      signal ? { signal } : undefined
+    ),
+    signal
+  );
+
   return Array.isArray(response) ? response[0] : response;
 }
 
 async function importGcpSdk(): Promise<GcpSdkModule> {
   try {
-    return (await importOptionalModule("@google-cloud/secret-manager")) as GcpSdkModule;
+    const moduleName = "@google-cloud/secret-manager";
+    return (await import(moduleName)) as GcpSdkModule;
   } catch {
     throw new Error(
       "GCP Secret Manager SDK is not installed. Add '@google-cloud/secret-manager' to use GCP API mode."
@@ -130,11 +160,42 @@ async function importGcpSdk(): Promise<GcpSdkModule> {
   }
 }
 
-async function importOptionalModule(moduleName: string): Promise<unknown> {
-  const dynamicImport = new Function(
-    "moduleName",
-    "return import(moduleName);"
-  ) as (name: string) => Promise<unknown>;
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    throw createAbortError();
+  }
+}
 
-  return dynamicImport(moduleName);
+function withAbortSignal<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) {
+    return promise;
+  }
+
+  if (signal.aborted) {
+    return Promise.reject(createAbortError());
+  }
+
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      reject(createAbortError());
+    };
+
+    signal.addEventListener("abort", onAbort, { once: true });
+
+    promise
+      .then((value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      })
+      .catch((error) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      });
+  });
+}
+
+function createAbortError(): Error {
+  const error = new Error("GCP API request was aborted");
+  error.name = "AbortError";
+  return error;
 }

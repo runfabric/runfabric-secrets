@@ -6,13 +6,17 @@ import {
   type SecretResult,
   type SingleSourceSecretRequest
 } from "@runfabric/secrets-core";
-import type { VaultAdapterOptions, VaultCliExecutionResult } from "./vault-types.js";
+import type {
+  VaultAdapterOptions,
+  VaultCliExecutionOptions,
+  VaultCliExecutionResult
+} from "./vault-types.js";
 import {
   extractVaultValue,
   getVaultCliBinaryPath,
-  getVaultKvVersion,
-  getVaultNamespace,
-  getVaultTokenEnvVar,
+  getVaultCliKvVersion,
+  getVaultCliNamespace,
+  getVaultCliTokenEnvVar,
   isVaultCliNotFound,
   parseVaultApiResponse,
   resolveVaultPath
@@ -25,16 +29,28 @@ export async function loadFromVaultCli(
 ): Promise<SecretResult> {
   const binaryPath = getVaultCliBinaryPath(options);
   const path = resolveVaultPath(request.key, options.mount);
-  const kvVersion = getVaultKvVersion(options);
+  const kvVersion = getVaultCliKvVersion(options);
+
+  if (request.version && kvVersion === 1) {
+    throw new Error("Vault KV v1 does not support versioned secret reads.");
+  }
+
   const args =
     kvVersion === 1
       ? ["read", "-format=json", path]
-      : ["kv", "get", "-format=json", path];
+      : [
+          "kv",
+          "get",
+          "-format=json",
+          ...(request.version ? [`-version=${request.version}`] : []),
+          path
+        ];
 
   const executor = options.cli?.executor ?? executeVaultCli;
   const env = buildVaultCliEnv(context, options);
+  const executionOptions = resolveCliExecutionOptions(options, request.signal);
 
-  const result = await executor(binaryPath, args, context, env);
+  const result = await executor(binaryPath, args, context, env, executionOptions);
 
   if (result.exitCode !== 0) {
     if (isVaultCliNotFound(result.stderr)) {
@@ -75,9 +91,16 @@ export async function checkVaultCliHealth(
   const binaryPath = getVaultCliBinaryPath(options);
   const executor = options.cli?.executor ?? executeVaultCli;
   const env = buildVaultCliEnv(context, options);
+  const executionOptions = resolveCliExecutionOptions(options);
 
   try {
-    const result = await executor(binaryPath, ["status", "-format=json"], context, env);
+    const result = await executor(
+      binaryPath,
+      ["status", "-format=json"],
+      context,
+      env,
+      executionOptions
+    );
 
     if (result.exitCode !== 0) {
       return {
@@ -114,8 +137,13 @@ export async function executeVaultCli(
   binaryPath: string,
   args: string[],
   _context: SecretAdapterContext,
-  env: NodeJS.ProcessEnv
+  env: NodeJS.ProcessEnv,
+  executionOptions: VaultCliExecutionOptions = {}
 ): Promise<VaultCliExecutionResult> {
+  if (executionOptions.signal?.aborted) {
+    throw createAbortError("Vault CLI command was aborted before execution");
+  }
+
   return new Promise((resolve, reject) => {
     const child = spawn(binaryPath, args, {
       env,
@@ -124,22 +152,120 @@ export async function executeVaultCli(
 
     let stdout = "";
     let stderr = "";
+    let settled = false;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    let forceKillTimer: ReturnType<typeof setTimeout> | undefined;
+    let terminationError: Error | null = null;
+    const timeoutMs = executionOptions.timeoutMs ?? DEFAULT_VAULT_CLI_TIMEOUT_MS;
+    const terminationGraceMs =
+      executionOptions.terminationGraceMs ?? DEFAULT_VAULT_CLI_TERMINATION_GRACE_MS;
+    const maxOutputBytes = executionOptions.maxOutputBytes ?? DEFAULT_VAULT_CLI_MAX_OUTPUT_BYTES;
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+
+    const finish = (handler: () => void) => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+
+      if (timeout) {
+        clearTimeout(timeout);
+      }
+
+      if (forceKillTimer) {
+        clearTimeout(forceKillTimer);
+      }
+
+      if (executionOptions.signal) {
+        executionOptions.signal.removeEventListener("abort", onAbort);
+      }
+
+      handler();
+    };
+
+    const requestStop = (error: Error) => {
+      if (terminationError) {
+        return;
+      }
+
+      terminationError = error;
+      child.kill("SIGTERM");
+
+      if (terminationGraceMs > 0) {
+        forceKillTimer = setTimeout(() => {
+          child.kill("SIGKILL");
+        }, terminationGraceMs);
+
+        if (typeof forceKillTimer.unref === "function") {
+          forceKillTimer.unref();
+        }
+      }
+    };
+
+    const onAbort = () => {
+      requestStop(createAbortError("Vault CLI command was aborted"));
+    };
+
+    const appendChunk = (stream: "stdout" | "stderr", chunk: Buffer) => {
+      const totalBytes = stdoutBytes + stderrBytes + chunk.length;
+      if (maxOutputBytes > 0 && totalBytes > maxOutputBytes) {
+        requestStop(new Error(`Vault CLI output exceeded ${maxOutputBytes} bytes`));
+        return;
+      }
+
+      const text = chunk.toString("utf8");
+      if (stream === "stdout") {
+        stdoutBytes += chunk.length;
+        stdout += text;
+        return;
+      }
+
+      stderrBytes += chunk.length;
+      stderr += text;
+    };
 
     child.stdout.on("data", (chunk: Buffer) => {
-      stdout += chunk.toString("utf8");
+      appendChunk("stdout", chunk);
     });
 
     child.stderr.on("data", (chunk: Buffer) => {
-      stderr += chunk.toString("utf8");
+      appendChunk("stderr", chunk);
     });
 
-    child.on("error", reject);
+    if (executionOptions.signal) {
+      executionOptions.signal.addEventListener("abort", onAbort, { once: true });
+    }
+
+    if (timeoutMs > 0) {
+      timeout = setTimeout(() => {
+        requestStop(new Error(`Vault CLI command timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+
+      if (typeof timeout.unref === "function") {
+        timeout.unref();
+      }
+    }
+
+    child.on("error", (error) => {
+      finish(() => {
+        reject(terminationError ?? error);
+      });
+    });
 
     child.on("close", (exitCode) => {
-      resolve({
-        stdout,
-        stderr,
-        exitCode
+      finish(() => {
+        if (terminationError) {
+          reject(terminationError);
+          return;
+        }
+
+        resolve({
+          stdout,
+          stderr,
+          exitCode
+        });
       });
     });
   });
@@ -149,9 +275,11 @@ function buildVaultCliEnv(
   context: SecretAdapterContext,
   options: VaultAdapterOptions
 ): NodeJS.ProcessEnv {
-  const tokenEnvVar = getVaultTokenEnvVar(options);
-  const token = options.api?.token ?? context.env[tokenEnvVar];
-  const namespace = getVaultNamespace(options);
+  assertVaultCliEndpointIsSecure(options.url);
+
+  const tokenEnvVar = getVaultCliTokenEnvVar(options);
+  const token = options.cli?.token ?? context.env[tokenEnvVar];
+  const namespace = getVaultCliNamespace(options);
 
   return {
     ...context.env,
@@ -167,5 +295,40 @@ function parseVaultCliJson(stdout: string, key: string): unknown {
   } catch (error) {
     const reason = error instanceof Error ? error.message : "invalid JSON";
     throw new SecretParseError(key, reason);
+  }
+}
+
+const DEFAULT_VAULT_CLI_TIMEOUT_MS = 60_000;
+const DEFAULT_VAULT_CLI_TERMINATION_GRACE_MS = 5_000;
+const DEFAULT_VAULT_CLI_MAX_OUTPUT_BYTES = 1_048_576;
+
+function resolveCliExecutionOptions(
+  options: VaultAdapterOptions,
+  signal?: AbortSignal
+): VaultCliExecutionOptions {
+  const timeoutMs = options.cli?.timeoutMs ?? DEFAULT_VAULT_CLI_TIMEOUT_MS;
+  const terminationGraceMs =
+    options.cli?.terminationGraceMs ?? DEFAULT_VAULT_CLI_TERMINATION_GRACE_MS;
+  const maxOutputBytes =
+    options.cli?.maxOutputBytes ?? DEFAULT_VAULT_CLI_MAX_OUTPUT_BYTES;
+
+  return {
+    signal,
+    timeoutMs: Math.max(0, Math.floor(timeoutMs)),
+    terminationGraceMs: Math.max(0, Math.floor(terminationGraceMs)),
+    maxOutputBytes: Math.max(0, Math.floor(maxOutputBytes))
+  };
+}
+
+function createAbortError(message: string): Error {
+  const error = new Error(message);
+  error.name = "AbortError";
+  return error;
+}
+
+function assertVaultCliEndpointIsSecure(url: string): void {
+  const parsed = new URL(url);
+  if (parsed.protocol !== "https:") {
+    throw new Error(`Vault CLI mode requires an HTTPS URL. Received '${url}'.`);
   }
 }

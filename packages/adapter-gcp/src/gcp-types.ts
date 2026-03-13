@@ -12,9 +12,17 @@ export interface GcpAccessSecretVersionResponse {
 
 export interface GcpSecretManagerClientLike {
   accessSecretVersion?(
-    request: { name: string }
+    request: { name: string },
+    options?: {
+      signal?: AbortSignal;
+    }
   ): Promise<[GcpAccessSecretVersionResponse] | GcpAccessSecretVersionResponse>;
-  listSecrets?(request: { parent: string; pageSize?: number }): Promise<unknown>;
+  listSecrets?(
+    request: { parent: string; pageSize?: number },
+    options?: {
+      signal?: AbortSignal;
+    }
+  ): Promise<unknown>;
 }
 
 export interface GcpCliExecutionResult {
@@ -23,10 +31,18 @@ export interface GcpCliExecutionResult {
   exitCode: number | null;
 }
 
+export interface GcpCliExecutionOptions {
+  signal?: AbortSignal;
+  timeoutMs?: number;
+  terminationGraceMs?: number;
+  maxOutputBytes?: number;
+}
+
 export type GcpCliExecutor = (
   binaryPath: string,
   args: string[],
-  context: SecretAdapterContext
+  context: SecretAdapterContext,
+  options?: GcpCliExecutionOptions
 ) => Promise<GcpCliExecutionResult>;
 
 export interface GcpAdapterOptions {
@@ -39,5 +55,8 @@ export interface GcpAdapterOptions {
     binaryPath?: string;
     extraArgs?: string[];
     executor?: GcpCliExecutor;
+    timeoutMs?: number;
+    terminationGraceMs?: number;
+    maxOutputBytes?: number;
   };
 }

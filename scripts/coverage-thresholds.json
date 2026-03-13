@@ -1,0 +1,64 @@
+{
+  "default": {
+    "lines": 0,
+    "branches": 0,
+    "functions": 0
+  },
+  "workspaces": {
+    "packages/adapter-aws": {
+      "lines": 74,
+      "branches": 64,
+      "functions": 79
+    },
+    "packages/adapter-azure": {
+      "lines": 71,
+      "branches": 65,
+      "functions": 77
+    },
+    "packages/adapter-env": {
+      "lines": 100,
+      "branches": 100,
+      "functions": 100
+    },
+    "packages/adapter-file": {
+      "lines": 75,
+      "branches": 81,
+      "functions": 77
+    },
+    "packages/adapter-gcp": {
+      "lines": 72,
+      "branches": 63,
+      "functions": 81
+    },
+    "packages/adapter-vault": {
+      "lines": 80,
+      "branches": 76,
+      "functions": 86
+    },
+    "packages/core": {
+      "lines": 81,
+      "branches": 74,
+      "functions": 88
+    },
+    "packages/testing": {
+      "lines": 100,
+      "branches": 71,
+      "functions": 100
+    },
+    "packages/zod": {
+      "lines": 100,
+      "branches": 100,
+      "functions": 100
+    },
+    "apps/demo-nest": {
+      "lines": 93,
+      "branches": 100,
+      "functions": 80
+    },
+    "apps/demo-node": {
+      "lines": 91,
+      "branches": 66,
+      "functions": 50
+    }
+  }
+}

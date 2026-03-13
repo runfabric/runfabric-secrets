@@ -132,6 +132,100 @@ test("distributed cache prevents duplicate adapter reads", async () => {
   await client.dispose();
 });
 
+test("cache keys remain distinct when request segments contain delimiter-like content", async () => {
+  let hits = 0;
+
+  const adapter = {
+    source: "env",
+    capabilities: { native: true },
+    async get(request) {
+      hits += 1;
+      return {
+        value: `${request.key}|${request.version ?? "latest"}`,
+        metadata: {
+          source: "env",
+          mode: "native"
+        }
+      };
+    }
+  };
+
+  const client = createSecretClient({
+    adapters: [adapter],
+    defaultCacheTtlMs: 60_000
+  });
+
+  const first = await client.getValue({
+    source: "env",
+    key: "foo::bar",
+    required: true
+  });
+
+  const second = await client.getValue({
+    source: "env",
+    key: "foo",
+    version: "bar::latest",
+    required: true
+  });
+
+  assert.equal(first, "foo::bar|latest");
+  assert.equal(second, "foo|bar::latest");
+  assert.equal(hits, 2);
+
+  await client.dispose();
+});
+
+test("default mode falls back to another supported mode when needed", async () => {
+  const cliOnlyAdapter = {
+    source: "aws",
+    capabilities: { cli: true },
+    async get() {
+      return {
+        value: "from-cli",
+        metadata: {
+          source: "aws",
+          mode: "cli"
+        }
+      };
+    }
+  };
+
+  const apiOnlyAdapter = {
+    source: "vault",
+    capabilities: { api: true },
+    async get() {
+      return {
+        value: "from-api",
+        metadata: {
+          source: "vault",
+          mode: "api"
+        }
+      };
+    }
+  };
+
+  const client = createSecretClient({
+    adapters: [cliOnlyAdapter, apiOnlyAdapter],
+    defaultMode: "api"
+  });
+
+  const cliValue = await client.getValue({
+    source: "aws",
+    key: "X",
+    required: true
+  });
+  const apiValue = await client.getValue({
+    source: "vault",
+    key: "Y",
+    required: true
+  });
+
+  assert.equal(cliValue, "from-cli");
+  assert.equal(apiValue, "from-api");
+
+  await client.dispose();
+});
+
 test("telemetry hooks receive request lifecycle events", async () => {
   const events = {
     start: 0,
@@ -259,6 +353,76 @@ test("advanced fallback supports weighted and parallel strategies", async () => 
   await parallelClient.dispose();
 });
 
+test("parallel fallback aborts in-flight sources once one succeeds", async () => {
+  let slowAborted = false;
+
+  const slowAdapter = {
+    source: "env",
+    capabilities: { native: true },
+    async get(request) {
+      await new Promise((resolve, reject) => {
+        const timer = setTimeout(resolve, 200);
+        const abort = () => {
+          slowAborted = true;
+          clearTimeout(timer);
+          const error = new Error("aborted");
+          error.name = "AbortError";
+          reject(error);
+        };
+
+        if (request.signal?.aborted) {
+          abort();
+          return;
+        }
+
+        request.signal?.addEventListener("abort", abort, { once: true });
+      });
+
+      return {
+        value: "slow",
+        metadata: {
+          source: "env",
+          mode: "native"
+        }
+      };
+    }
+  };
+
+  const fastAdapter = {
+    source: "file",
+    capabilities: { native: true },
+    async get() {
+      await delay(5);
+      return {
+        value: "fast",
+        metadata: {
+          source: "file",
+          mode: "native"
+        }
+      };
+    }
+  };
+
+  const client = createSecretClient({
+    adapters: [slowAdapter, fastAdapter]
+  });
+
+  const value = await client.getValue({
+    sources: [{ source: "env" }, { source: "file" }],
+    key: "ABORT_ME",
+    required: true,
+    fallbackPolicy: {
+      strategy: "parallel",
+      parallelism: 2
+    }
+  });
+
+  assert.equal(value, "fast");
+  assert.equal(slowAborted, true);
+
+  await client.dispose();
+});
+
 test("fallback fail-fast stops on non-retryable errors", async () => {
   const parseError = new SecretParseError("BROKEN", "not json");
 
@@ -372,6 +536,82 @@ test("adapter discovery can load adapters and build client", async () => {
   assert.equal(value, "discovered");
 
   await client.dispose();
+});
+
+test("adapter discovery rejects non-allowlisted non-package module names", async () => {
+  await assert.rejects(
+    () =>
+      discoverAdapters({
+        plugins: [{ module: "./local-plugin", exportName: "createMyAdapter" }],
+        importer: async () => ({})
+      }),
+    /bare package specifier/
+  );
+});
+
+test("adapter discovery allows explicit allowlisted module names", async () => {
+  const adapters = await discoverAdapters({
+    plugins: [{ module: "./local-plugin", exportName: "createMyAdapter" }],
+    allowedModules: ["./local-plugin"],
+    importer: async () => ({
+      createMyAdapter: () => ({
+        source: "file",
+        capabilities: { native: true },
+        async get() {
+          return {
+            value: "allowlisted",
+            metadata: {
+              source: "file",
+              mode: "native"
+            }
+          };
+        }
+      })
+    })
+  });
+
+  assert.equal(adapters.length, 1);
+});
+
+test("adapter discovery requires allowlist when using default importer", async () => {
+  await assert.rejects(
+    () =>
+      discoverAdapters({
+        plugins: [{ module: "my-plugin", exportName: "createMyAdapter" }]
+      }),
+    /allowedModules must be provided/
+  );
+});
+
+test("adapter discovery imports normalized module specifiers", async () => {
+  let requestedModuleName = "";
+
+  const adapters = await discoverAdapters({
+    plugins: [{ module: "  my-plugin  ", exportName: "createMyAdapter" }],
+    allowedModules: ["my-plugin"],
+    importer: async (moduleName) => {
+      requestedModuleName = moduleName;
+
+      return {
+        createMyAdapter: () => ({
+          source: "env",
+          capabilities: { native: true },
+          async get() {
+            return {
+              value: "normalized",
+              metadata: {
+                source: "env",
+                mode: "native"
+              }
+            };
+          }
+        })
+      };
+    }
+  });
+
+  assert.equal(requestedModuleName, "my-plugin");
+  assert.equal(adapters.length, 1);
 });
 
 test("browser client helper creates client without process.env dependency", async () => {

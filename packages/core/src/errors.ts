@@ -12,6 +12,17 @@ export class SecretAdapterNotFoundError extends SecretError {
   }
 }
 
+export class SecretDuplicateAdapterError extends SecretError {
+  readonly sources: string[];
+
+  constructor(sources: string[]) {
+    const uniqueSources = [...new Set(sources)];
+    super(`Duplicate adapters registered for source(s): ${uniqueSources.join(", ")}`);
+    this.name = "SecretDuplicateAdapterError";
+    this.sources = uniqueSources;
+  }
+}
+
 export class SecretModeNotSupportedError extends SecretError {
   constructor(source: string, mode: string) {
     super(`Adapter '${source}' does not support mode '${mode}'`);

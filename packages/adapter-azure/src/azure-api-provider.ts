@@ -20,6 +20,8 @@ interface AzureIdentitySdkModule {
   DefaultAzureCredential: new () => unknown;
 }
 
+const apiClientCache = new WeakMap<AzureAdapterOptions, Promise<AzureSecretClientLike>>();
+
 export async function loadFromAzureApi(
   request: SingleSourceSecretRequest,
   context: SecretAdapterContext,
@@ -29,9 +31,15 @@ export async function loadFromAzureApi(
 
   try {
     const client = await getApiClient(options);
-    const response = await client.getSecret(
-      secretName,
-      request.version ? { version: request.version } : undefined
+    throwIfAborted(request.signal);
+    const response = await withAbortSignal(
+      client.getSecret(
+        secretName,
+        request.version
+          ? { version: request.version, abortSignal: request.signal }
+          : { abortSignal: request.signal }
+      ),
+      request.signal
     );
     const value = extractAzureSecretValue(request.key, response);
 
@@ -95,6 +103,23 @@ export async function checkAzureApiHealth(
 }
 
 async function getApiClient(options: AzureAdapterOptions): Promise<AzureSecretClientLike> {
+  const cached = apiClientCache.get(options);
+  if (cached) {
+    return cached;
+  }
+
+  const pendingClient = resolveApiClient(options);
+  apiClientCache.set(options, pendingClient);
+
+  try {
+    return await pendingClient;
+  } catch (error) {
+    apiClientCache.delete(options);
+    throw error;
+  }
+}
+
+async function resolveApiClient(options: AzureAdapterOptions): Promise<AzureSecretClientLike> {
   if (options.api?.client) {
     return options.api.client;
   }
@@ -110,7 +135,8 @@ async function getApiClient(options: AzureAdapterOptions): Promise<AzureSecretCl
 
 async function importAzureKeyVaultSdk(): Promise<AzureKeyVaultSdkModule> {
   try {
-    return (await importOptionalModule("@azure/keyvault-secrets")) as AzureKeyVaultSdkModule;
+    const moduleName = "@azure/keyvault-secrets";
+    return (await import(moduleName)) as AzureKeyVaultSdkModule;
   } catch {
     throw new Error(
       "Azure Key Vault SDK is not installed. Add '@azure/keyvault-secrets' to use Azure API mode."
@@ -120,7 +146,8 @@ async function importAzureKeyVaultSdk(): Promise<AzureKeyVaultSdkModule> {
 
 async function importAzureIdentitySdk(): Promise<AzureIdentitySdkModule> {
   try {
-    return (await importOptionalModule("@azure/identity")) as AzureIdentitySdkModule;
+    const moduleName = "@azure/identity";
+    return (await import(moduleName)) as AzureIdentitySdkModule;
   } catch {
     throw new Error(
       "Azure Identity SDK is not installed. Add '@azure/identity' to use Azure API mode."
@@ -128,11 +155,42 @@ async function importAzureIdentitySdk(): Promise<AzureIdentitySdkModule> {
   }
 }
 
-async function importOptionalModule(moduleName: string): Promise<unknown> {
-  const dynamicImport = new Function(
-    "moduleName",
-    "return import(moduleName);"
-  ) as (name: string) => Promise<unknown>;
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    throw createAbortError();
+  }
+}
 
-  return dynamicImport(moduleName);
+function withAbortSignal<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) {
+    return promise;
+  }
+
+  if (signal.aborted) {
+    return Promise.reject(createAbortError());
+  }
+
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      reject(createAbortError());
+    };
+
+    signal.addEventListener("abort", onAbort, { once: true });
+
+    promise
+      .then((value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      })
+      .catch((error) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      });
+  });
+}
+
+function createAbortError(): Error {
+  const error = new Error("Azure API request was aborted");
+  error.name = "AbortError";
+  return error;
 }

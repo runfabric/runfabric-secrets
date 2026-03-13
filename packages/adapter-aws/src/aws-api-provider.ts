@@ -18,6 +18,8 @@ interface AwsSdkModule {
   ListSecretsCommand?: new (input: { MaxResults: number }) => unknown;
 }
 
+const apiClientCache = new WeakMap<AwsAdapterOptions, Promise<{ client: AwsSecretsManagerClientLike; sdk: AwsSdkModule | null }>>();
+
 export async function loadFromAwsApi(
   request: SingleSourceSecretRequest,
   context: SecretAdapterContext,
@@ -27,7 +29,7 @@ export async function loadFromAwsApi(
 
   try {
     const { client, sdk } = await getApiClient(options);
-    const output = await invokeGetSecretValue(client, input, sdk, context);
+    const output = await invokeGetSecretValue(client, input, sdk, context, request.signal);
     const value = extractAwsSecretValue(request.key, output);
 
     return {
@@ -91,6 +93,25 @@ export async function checkAwsApiHealth(
 async function getApiClient(
   options: AwsAdapterOptions
 ): Promise<{ client: AwsSecretsManagerClientLike; sdk: AwsSdkModule | null }> {
+  const cached = apiClientCache.get(options);
+  if (cached) {
+    return cached;
+  }
+
+  const pendingClient = resolveApiClient(options);
+  apiClientCache.set(options, pendingClient);
+
+  try {
+    return await pendingClient;
+  } catch (error) {
+    apiClientCache.delete(options);
+    throw error;
+  }
+}
+
+async function resolveApiClient(
+  options: AwsAdapterOptions
+): Promise<{ client: AwsSecretsManagerClientLike; sdk: AwsSdkModule | null }> {
   if (options.api?.client) {
     return {
       client: options.api.client,
@@ -114,18 +135,36 @@ async function invokeGetSecretValue(
   client: AwsSecretsManagerClientLike,
   input: AwsGetSecretInput,
   sdk: AwsSdkModule | null,
-  context: SecretAdapterContext
+  context: SecretAdapterContext,
+  signal?: AbortSignal
 ): Promise<AwsGetSecretOutput> {
+  throwIfAborted(signal);
+
   if (typeof client.getSecretValue === "function") {
-    return client.getSecretValue(input);
+    return withAbortSignal(
+      client.getSecretValue(
+        input,
+        signal ? { abortSignal: signal } : undefined
+      ),
+      signal
+    );
   }
 
   if (typeof client.send === "function") {
     if (sdk?.GetSecretValueCommand) {
-      return client.send(new sdk.GetSecretValueCommand(input));
+      return withAbortSignal(
+        client.send(
+          new sdk.GetSecretValueCommand(input),
+          signal ? { abortSignal: signal } : undefined
+        ),
+        signal
+      );
     }
 
-    return client.send(input);
+    return withAbortSignal(
+      client.send(input, signal ? { abortSignal: signal } : undefined),
+      signal
+    );
   }
 
   context.logger?.error("AWS API client is missing getSecretValue/send methods", {
@@ -143,4 +182,44 @@ async function importAwsSdk(): Promise<AwsSdkModule> {
       "AWS SDK is not installed. Add '@aws-sdk/client-secrets-manager' to use AWS API mode."
     );
   }
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    throw createAbortError();
+  }
+}
+
+function withAbortSignal<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) {
+    return promise;
+  }
+
+  if (signal.aborted) {
+    return Promise.reject(createAbortError());
+  }
+
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      reject(createAbortError());
+    };
+
+    signal.addEventListener("abort", onAbort, { once: true });
+
+    promise
+      .then((value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      })
+      .catch((error) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      });
+  });
+}
+
+function createAbortError(): Error {
+  const error = new Error("AWS API request was aborted");
+  error.name = "AbortError";
+  return error;
 }

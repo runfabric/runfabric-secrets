@@ -1,6 +1,11 @@
 import { z } from "zod";
 
 export const secretModeSchema = z.union([z.literal("api"), z.literal("cli")]);
+export const fallbackStrategySchema = z.union([
+  z.literal("sequential"),
+  z.literal("weighted"),
+  z.literal("parallel")
+]);
 
 export const secretParseAsSchema = z.union([
   z.literal("raw"),
@@ -30,23 +35,33 @@ export const secretRequestBaseSchema = z.object({
   parseAs: secretParseAsSchema.optional(),
   required: z.boolean().optional(),
   cacheTtlMs: z.number().int().nonnegative().optional(),
-  version: z.string().optional()
+  version: z.string().optional(),
+  refreshIntervalMs: z.number().nonnegative().optional()
+});
+
+export const fallbackPolicySchema = z.object({
+  strategy: fallbackStrategySchema.optional(),
+  failFast: z.boolean().optional(),
+  failFastOn: z.array(z.string()).optional(),
+  retryableErrors: z.array(z.string()).optional(),
+  parallelism: z.number().int().positive().optional()
+});
+
+export const fallbackSourceConfigSchema = z.object({
+  source: secretSourceSchema,
+  mode: secretModeSchema.optional(),
+  weight: z.number().optional()
 });
 
 export const singleSourceSecretRequestSchema = secretRequestBaseSchema.extend({
   source: secretSourceSchema,
-  mode: secretModeSchema.optional()
+  mode: secretModeSchema.optional(),
+  signal: z.unknown().optional()
 });
 
 export const fallbackSecretRequestSchema = secretRequestBaseSchema.extend({
-  sources: z
-    .array(
-      z.object({
-        source: secretSourceSchema,
-        mode: secretModeSchema.optional()
-      })
-    )
-    .min(1)
+  sources: z.array(fallbackSourceConfigSchema).min(1),
+  fallbackPolicy: fallbackPolicySchema.optional()
 });
 
 export const secretRequestSchema = z.union([

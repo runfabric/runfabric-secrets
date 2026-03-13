@@ -13,4 +13,11 @@ Release checklist:
 - `pnpm test`
 - `pnpm typecheck`
 - `pnpm build`
+- `pnpm coverage`
 - `pnpm release:check`
+- `pnpm snyk:test` (requires `SNYK_TOKEN`)
+
+Coverage guidance:
+
+- Coverage thresholds are configured in `scripts/coverage-thresholds.json`.
+- `pnpm coverage` writes machine-readable output to `coverage/summary.json`.

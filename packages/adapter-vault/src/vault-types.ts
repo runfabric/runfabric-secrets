@@ -12,11 +12,19 @@ export interface VaultCliExecutionResult {
   exitCode: number | null;
 }
 
+export interface VaultCliExecutionOptions {
+  signal?: AbortSignal;
+  timeoutMs?: number;
+  terminationGraceMs?: number;
+  maxOutputBytes?: number;
+}
+
 export type VaultCliExecutor = (
   binaryPath: string,
   args: string[],
   context: SecretAdapterContext,
-  env: NodeJS.ProcessEnv
+  env: NodeJS.ProcessEnv,
+  options?: VaultCliExecutionOptions
 ) => Promise<VaultCliExecutionResult>;
 
 export interface VaultAdapterOptions {
@@ -24,15 +32,20 @@ export interface VaultAdapterOptions {
   mount?: string;
   api?: {
     token?: string;
+    tokenEnvVar?: string;
     kvVersion?: VaultKvVersion;
     namespace?: string;
     fetcher?: VaultApiFetcher;
   };
   cli?: {
     binaryPath?: string;
+    token?: string;
     tokenEnvVar?: string;
     kvVersion?: VaultKvVersion;
     namespace?: string;
     executor?: VaultCliExecutor;
+    timeoutMs?: number;
+    terminationGraceMs?: number;
+    maxOutputBytes?: number;
   };
 }
