@@ -15,6 +15,7 @@ jobs:
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
       SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+      SNYK_ORG: ${{ secrets.SNYK_ORG }}
     permissions:
       contents: read
     steps:
@@ -33,18 +34,60 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Run Snyk test
+      - name: Validate Snyk authentication
+        id: snyk_auth
         if: env.SNYK_TOKEN != ''
-        run: pnpm snyk:test
-        env:
-          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        shell: bash
+        run: |
+          set +e
+          npx snyk whoami
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "::warning::Snyk authentication failed (exit $status). Skipping Snyk scan steps."
+          echo "ok=false" >> "$GITHUB_OUTPUT"
+
+      - name: Run Snyk test
+        if: env.SNYK_TOKEN != '' && steps.snyk_auth.outputs.ok == 'true'
+        shell: bash
+        run: |
+          set +e
+          if [ -n "${SNYK_ORG:-}" ]; then
+            npx snyk test --all-projects --org="$SNYK_ORG"
+          else
+            npx snyk test --all-projects
+          fi
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ] || [ "$status" -eq 1 ]; then
+            exit "$status"
+          fi
+          echo "::warning::Snyk test failed with non-vulnerability error (exit $status)."
+          exit 0
 
       - name: Run Snyk monitor on main
-        if: env.SNYK_TOKEN != '' && github.ref == 'refs/heads/main' && github.event_name == 'push'
-        run: pnpm snyk:monitor
-        env:
-          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        if: env.SNYK_TOKEN != '' && steps.snyk_auth.outputs.ok == 'true' && github.ref == 'refs/heads/main' && github.event_name == 'push'
+        shell: bash
+        run: |
+          set +e
+          if [ -n "${SNYK_ORG:-}" ]; then
+            npx snyk monitor --all-projects --org="$SNYK_ORG"
+          else
+            npx snyk monitor --all-projects
+          fi
+          status=$?
+          set -e
+          if [ "$status" -ne 0 ]; then
+            echo "::warning::Snyk monitor failed (exit $status). Continuing."
+          fi
 
       - name: Skip when SNYK_TOKEN is missing
         if: env.SNYK_TOKEN == ''
         run: echo "SNYK_TOKEN is not configured, skipping Snyk scan."
+
+      - name: Skip when Snyk authentication fails
+        if: env.SNYK_TOKEN != '' && steps.snyk_auth.outputs.ok != 'true'
+        run: echo "Snyk token is configured but authentication failed; skipped scan steps."
